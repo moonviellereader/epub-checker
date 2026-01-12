@@ -1,6 +1,6 @@
 """
-EPUB Diff Checker - Highlight Perbedaan dengan Warna Biru
-Upload 2 EPUB, bagian yang berbeda akan di-highlight biru
+EPUB Diff Checker - Find New/Different Content
+Temukan konten baru atau berbeda di EPUB 2 dibanding EPUB 1
 """
 
 import streamlit as st
@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 import difflib
 from io import BytesIO
 import html
+import re
 
 st.set_page_config(page_title="EPUB Diff Checker", page_icon="📚", layout="wide")
 
@@ -17,294 +18,343 @@ st.markdown("""
 <style>
     .main .block-container { max-width: 100%; padding: 1rem 2rem; }
     
-    .row { display: flex; gap: 15px; margin-bottom: 8px; }
+    .row { 
+        display: flex; 
+        gap: 20px; 
+        margin-bottom: 3px; 
+    }
     
     .cell {
         flex: 1;
-        padding: 10px 12px;
-        border-radius: 5px;
+        padding: 8px 12px;
         font-family: 'Nanum Gothic', 'Malgun Gothic', sans-serif;
         font-size: 15px;
         line-height: 1.8;
-        background: #fafafa;
-        border-left: 3px solid #ddd;
+        background: white;
+        border-bottom: 1px solid #f0f0f0;
     }
     
-    .cell-left { background: #f9f9f9; }
-    .cell-right { background: #f9f9f9; }
-    
-    /* Highlight biru untuk perbedaan */
-    .diff { background-color: #90caf9; padding: 1px 3px; border-radius: 3px; }
-    
-    .cell.has-diff { background: #e3f2fd; border-left-color: #2196f3; }
+    .cell.diff {
+        background: #e3f2fd;
+    }
     
     .cell.empty {
-        background: #f5f5f5;
-        border: 1px dashed #ccc;
-        color: #999;
-        text-align: center;
-        font-style: italic;
+        background: #fafafa;
+        color: #ccc;
     }
     
-    .chapter-header {
+    .highlight { 
+        background-color: #90caf9; 
+        padding: 1px 3px; 
+        border-radius: 3px; 
+    }
+    
+    .header-row {
+        display: flex;
+        gap: 20px;
+        padding: 12px 15px;
         background: #1976d2;
         color: white;
-        padding: 12px 20px;
-        border-radius: 8px;
-        margin: 25px 0 15px 0;
         font-weight: bold;
+        border-radius: 8px 8px 0 0;
+        position: sticky;
+        top: 0;
+        z-index: 100;
     }
     
-    .num { font-size: 0.7em; color: #888; }
+    .header-row > div { flex: 1; }
     
-    .stats { 
-        background: #e3f2fd; 
-        padding: 10px 15px; 
-        border-radius: 5px; 
+    .content-box {
+        border: 1px solid #ddd;
+        border-top: none;
+        border-radius: 0 0 8px 8px;
+        max-height: 75vh;
+        overflow-y: auto;
+        background: white;
+    }
+    
+    .num { 
+        font-size: 0.7em; 
+        color: #999;
+        margin-right: 5px;
+    }
+    
+    .stats {
+        display: flex;
+        gap: 15px;
+        padding: 12px 15px;
+        background: #f5f5f5;
+        border-radius: 8px;
         margin: 10px 0;
-        color: #1565c0;
+        flex-wrap: wrap;
     }
+    
+    .stat {
+        padding: 6px 12px;
+        border-radius: 5px;
+        font-size: 0.9em;
+    }
+    
+    .stat-total { background: #e0e0e0; }
+    .stat-diff { background: #e3f2fd; color: #1565c0; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 
-def extract_epub(epub_file):
+def normalize(text):
+    """Normalize for comparison"""
+    return re.sub(r'\s+', '', text)
+
+
+def extract_paragraphs(epub_file):
+    """Extract paragraphs maintaining order"""
     book = epub.read_epub(epub_file)
-    chapters = []
+    paragraphs = []
+    seen = set()
     
     for item in book.get_items():
         if item.get_type() == ebooklib.ITEM_DOCUMENT:
             soup = BeautifulSoup(item.get_content(), 'html.parser')
             
-            title = None
-            title_tag = soup.find(['h1', 'h2', 'h3', 'title'])
-            if title_tag:
-                title = title_tag.get_text(strip=True)
-            
-            paragraphs = []
-            for p in soup.find_all(['p', 'div']):
-                text = p.get_text(strip=True)
-                if text and len(text) > 1:
-                    paragraphs.append(text)
-            
-            if paragraphs:
-                chapters.append({
-                    'title': title or item.get_name(),
-                    'paragraphs': paragraphs,
-                    'full_text': '\n'.join(paragraphs)
-                })
+            for elem in soup.find_all(['p', 'div']):
+                text = elem.get_text(strip=True)
+                
+                if not text or len(text) <= 1:
+                    continue
+                if len(text) > 5000:
+                    continue
+                
+                norm = normalize(text)
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                paragraphs.append(text)
     
-    return chapters
+    return paragraphs
 
 
-def get_diff_highlight(text1, text2):
-    """Highlight perbedaan dengan warna biru"""
-    if text1 == text2:
-        return html.escape(text1), html.escape(text2), False
+def build_reference_set(paragraphs):
+    """Build set of normalized text chunks for quick lookup"""
+    ref = set()
     
-    matcher = difflib.SequenceMatcher(None, text1, text2)
-    out1, out2 = [], []
-    
-    for op, i1, i2, j1, j2 in matcher.get_opcodes():
-        if op == 'equal':
-            out1.append(html.escape(text1[i1:i2]))
-            out2.append(html.escape(text2[j1:j2]))
-        elif op == 'delete':
-            out1.append(f'<span class="diff">{html.escape(text1[i1:i2])}</span>')
-        elif op == 'insert':
-            out2.append(f'<span class="diff">{html.escape(text2[j1:j2])}</span>')
-        elif op == 'replace':
-            out1.append(f'<span class="diff">{html.escape(text1[i1:i2])}</span>')
-            out2.append(f'<span class="diff">{html.escape(text2[j1:j2])}</span>')
-    
-    return ''.join(out1), ''.join(out2), True
-
-
-def align_paragraphs(paras1, paras2):
-    aligned = []
-    matcher = difflib.SequenceMatcher(None, paras1, paras2)
-    
-    for op, i1, i2, j1, j2 in matcher.get_opcodes():
-        if op == 'equal':
-            for k in range(i2 - i1):
-                aligned.append(('same', paras1[i1+k], paras2[j1+k], i1+k+1, j1+k+1))
-        elif op == 'delete':
-            for k in range(i1, i2):
-                aligned.append(('del', paras1[k], None, k+1, None))
-        elif op == 'insert':
-            for k in range(j1, j2):
-                aligned.append(('add', None, paras2[k], None, k+1))
-        elif op == 'replace':
-            old_p, new_p = paras1[i1:i2], paras2[j1:j2]
-            max_len = max(len(old_p), len(new_p))
-            for k in range(max_len):
-                op_ = old_p[k] if k < len(old_p) else None
-                np_ = new_p[k] if k < len(new_p) else None
-                if op_ and np_:
-                    aligned.append(('mod', op_, np_, i1+k+1, j1+k+1))
-                elif op_:
-                    aligned.append(('del', op_, None, i1+k+1, None))
-                else:
-                    aligned.append(('add', None, np_, None, j1+k+1))
-    
-    return aligned
-
-
-def match_chapters(ch1, ch2):
-    matched, used = [], set()
-    
-    for i, c1 in enumerate(ch1):
-        best, score = None, 0
-        for j, c2 in enumerate(ch2):
-            if j in used: continue
-            if c1['title'] == c2['title']:
-                best, score = j, 1.0
-                break
-            r = difflib.SequenceMatcher(None, c1['full_text'][:500], c2['full_text'][:500]).ratio()
-            if r > score and r > 0.3:
-                score, best = r, j
+    for para in paragraphs:
+        norm = normalize(para)
+        ref.add(norm)
         
-        if best is not None:
-            matched.append((i, best))
-            used.add(best)
-        else:
-            matched.append((i, None))
+        # Also add smaller chunks (sentences) for partial matching
+        # Split by Korean sentence endings
+        sentences = re.split(r'(?<=[.?!」』"])\s*', para)
+        for sent in sentences:
+            if len(sent) > 10:
+                ref.add(normalize(sent))
     
-    for j in range(len(ch2)):
-        if j not in used:
-            matched.append((None, j))
-    
-    return matched
+    return ref
 
 
-# === MAIN ===
+def check_if_new(para, reference_set, reference_paras):
+    """Check if paragraph content is new (not in reference)"""
+    norm = normalize(para)
+    
+    # Exact match
+    if norm in reference_set:
+        return False, 1.0
+    
+    # Check if it's contained in any reference paragraph
+    for ref_para in reference_paras:
+        ref_norm = normalize(ref_para)
+        if norm in ref_norm or ref_norm in norm:
+            return False, 0.9
+    
+    # Check sentence-level matching
+    sentences = re.split(r'(?<=[.?!」』"])\s*', para)
+    matching_sentences = 0
+    total_sentences = 0
+    
+    for sent in sentences:
+        sent_norm = normalize(sent)
+        if len(sent_norm) < 10:
+            continue
+        total_sentences += 1
+        
+        if sent_norm in reference_set:
+            matching_sentences += 1
+            continue
+        
+        # Check partial match
+        for ref_para in reference_paras[:500]:  # Limit for performance
+            ref_norm = normalize(ref_para)
+            if sent_norm in ref_norm:
+                matching_sentences += 1
+                break
+    
+    if total_sentences == 0:
+        return False, 1.0
+    
+    match_ratio = matching_sentences / total_sentences
+    
+    # If most sentences are new, consider it new content
+    return match_ratio < 0.5, match_ratio
+
+
+def find_text_diff(text1, text2):
+    """Find character-level differences"""
+    matcher = difflib.SequenceMatcher(None, text1, text2)
+    result = []
+    
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
+        if op == 'equal':
+            result.append(html.escape(text2[j1:j2]))
+        elif op in ('insert', 'replace'):
+            result.append(f'<span class="highlight">{html.escape(text2[j1:j2])}</span>')
+    
+    return ''.join(result)
+
+
+# === MAIN APP ===
 st.title("📚 EPUB Diff Checker")
-st.caption("Upload 2 EPUB → Bagian berbeda akan di-highlight biru")
+st.caption("Temukan konten baru/berbeda di EPUB 2 (kanan) dibanding EPUB 1 (kiri)")
 
 col1, col2 = st.columns(2)
 with col1:
-    epub1 = st.file_uploader("📖 EPUB Lama (Original)", type=['epub'], key='e1')
+    epub1 = st.file_uploader("📖 EPUB 1 - Original (Kiri)", type=['epub'], key='e1')
 with col2:
-    epub2 = st.file_uploader("📖 EPUB Baru (Revised)", type=['epub'], key='e2')
+    epub2 = st.file_uploader("📖 EPUB 2 - Revised (Kanan)", type=['epub'], key='e2')
 
-# Sidebar
-show_same = st.sidebar.checkbox("Tampilkan paragraf yang sama", value=False)
-only_diff = st.sidebar.checkbox("Hanya chapter dengan perbedaan", value=True)
+st.sidebar.header("⚙️ Pengaturan")
+show_all = st.sidebar.checkbox("Tampilkan semua paragraf", value=True)
+show_only_diff = st.sidebar.checkbox("Hanya tampilkan yang berbeda", value=False)
 
 if epub1 and epub2:
-    with st.spinner("Memproses EPUB..."):
-        chapters1 = extract_epub(BytesIO(epub1.read()))
+    with st.spinner("Membaca EPUB..."):
+        paras1 = extract_paragraphs(BytesIO(epub1.read()))
         epub1.seek(0)
-        chapters2 = extract_epub(BytesIO(epub2.read()))
+        paras2 = extract_paragraphs(BytesIO(epub2.read()))
+    
+    st.success(f"✅ EPUB 1: {len(paras1)} paragraf | EPUB 2: {len(paras2)} paragraf")
+    
+    with st.spinner("Menganalisis perbedaan..."):
+        # Build reference from EPUB 1
+        ref_set = build_reference_set(paras1)
         
-        matched = match_chapters(chapters1, chapters2)
+        # Check each paragraph in EPUB 2
+        diff_info = []
+        for i, para in enumerate(paras2):
+            is_new, match_ratio = check_if_new(para, ref_set, paras1)
+            diff_info.append({
+                'idx': i,
+                'text': para,
+                'is_new': is_new,
+                'match_ratio': match_ratio
+            })
         
-        # Count diffs
-        total_diff = 0
+        diff_count = sum(1 for d in diff_info if d['is_new'])
+    
+    # Stats
+    st.markdown(f"""
+    <div class="stats">
+        <div class="stat stat-total">📄 Total EPUB 2: {len(paras2)} paragraf</div>
+        <div class="stat stat-diff">🔵 Konten baru/berbeda: {diff_count} paragraf</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Quick jump to differences
+    if diff_count > 0:
+        diff_indices = [d['idx'] for d in diff_info if d['is_new']]
+        st.markdown(f"**Ditemukan {diff_count} paragraf berbeda.** Pilih untuk loncat:")
         
-        # Chapter selector
-        ch_opts = []
-        for idx1, idx2 in matched:
-            if idx1 is None:
-                ch_opts.append(f"🆕 {chapters2[idx2]['title']}")
-            elif idx2 is None:
-                ch_opts.append(f"❌ {chapters1[idx1]['title']}")
+        jump_options = ["-- Pilih --"] + [f"#{i+1} (paragraf {diff_indices[i]+1})" for i in range(min(50, len(diff_indices)))]
+        selected_jump = st.selectbox("Loncat ke:", jump_options, key="jump")
+    
+    st.markdown("---")
+    
+    # Display header
+    st.markdown("""
+    <div class="header-row">
+        <div>📖 EPUB 1 - Original</div>
+        <div>📖 EPUB 2 - Revised (biru = baru/berbeda)</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Display content
+    rows_html = []
+    shown = 0
+    max_show = 300
+    
+    # Align display - show EPUB 2 on right, try to match EPUB 1 on left
+    j = 0  # Index for EPUB 1
+    
+    for i, info in enumerate(diff_info):
+        if shown >= max_show:
+            break
+        
+        if show_only_diff and not info['is_new']:
+            continue
+        
+        para2 = info['text']
+        is_diff = info['is_new']
+        
+        # Try to find corresponding paragraph in EPUB 1
+        para1 = ""
+        if j < len(paras1):
+            # Check if current EPUB 1 paragraph matches
+            norm1 = normalize(paras1[j])
+            norm2 = normalize(para2)
+            
+            if norm1 == norm2 or norm1 in norm2 or norm2 in norm1:
+                para1 = paras1[j]
+                j += 1
+            elif difflib.SequenceMatcher(None, norm1, norm2).ratio() > 0.5:
+                para1 = paras1[j]
+                j += 1
             else:
-                ch_opts.append(chapters1[idx1]['title'])
+                # Maybe EPUB 1 paragraph was merged, try next few
+                found = False
+                for look_ahead in range(min(5, len(paras1) - j)):
+                    check_norm = normalize(paras1[j + look_ahead])
+                    if check_norm in norm2 or difflib.SequenceMatcher(None, check_norm, norm2).ratio() > 0.6:
+                        para1 = paras1[j + look_ahead]
+                        j = j + look_ahead + 1
+                        found = True
+                        break
+                
+                if not found and not is_diff:
+                    para1 = paras1[j] if j < len(paras1) else ""
+                    j += 1
         
-        selected = st.selectbox("Pilih Chapter:", ["-- Semua --"] + ch_opts)
+        # Build HTML
+        left_html = html.escape(para1) if para1 else "-"
+        left_class = "cell" if para1 else "cell empty"
         
-        st.markdown("---")
+        if is_diff:
+            right_class = "cell diff"
+            right_html = f'<span class="highlight">{html.escape(para2)}</span>'
+        else:
+            right_class = "cell"
+            right_html = html.escape(para2)
         
-        for i, (idx1, idx2) in enumerate(matched):
-            # Filter
-            if selected != "-- Semua --" and ch_opts[i] != selected:
-                continue
-            
-            if idx1 is None:
-                # New chapter
-                ch = chapters2[idx2]
-                if only_diff or selected != "-- Semua --":
-                    st.markdown(f'<div class="chapter-header">🆕 {html.escape(ch["title"])} (Chapter Baru)</div>', unsafe_allow_html=True)
-                    rows = []
-                    for j, p in enumerate(ch['paragraphs']):
-                        rows.append(f'''<div class="row">
-                            <div class="cell cell-left empty">-</div>
-                            <div class="cell cell-right has-diff"><span class="num">#{j+1}</span> <span class="diff">{html.escape(p)}</span></div>
-                        </div>''')
-                    st.markdown("".join(rows), unsafe_allow_html=True)
-                continue
-            
-            if idx2 is None:
-                # Deleted chapter
-                ch = chapters1[idx1]
-                if only_diff or selected != "-- Semua --":
-                    st.markdown(f'<div class="chapter-header">❌ {html.escape(ch["title"])} (Chapter Dihapus)</div>', unsafe_allow_html=True)
-                    rows = []
-                    for j, p in enumerate(ch['paragraphs']):
-                        rows.append(f'''<div class="row">
-                            <div class="cell cell-left has-diff"><span class="num">#{j+1}</span> <span class="diff">{html.escape(p)}</span></div>
-                            <div class="cell cell-right empty">-</div>
-                        </div>''')
-                    st.markdown("".join(rows), unsafe_allow_html=True)
-                continue
-            
-            # Compare
-            ch1, ch2 = chapters1[idx1], chapters2[idx2]
-            aligned = align_paragraphs(ch1['paragraphs'], ch2['paragraphs'])
-            
-            diff_count = sum(1 for a in aligned if a[0] != 'same')
-            total_diff += diff_count
-            
-            if only_diff and diff_count == 0 and selected == "-- Semua --":
-                continue
-            
-            st.markdown(f'<div class="chapter-header">{html.escape(ch1["title"])} <span style="font-size:0.8em; opacity:0.8;">({diff_count} perbedaan)</span></div>', unsafe_allow_html=True)
-            
-            rows = []
-            for typ, left, right, l_idx, r_idx in aligned:
-                if typ == 'same':
-                    if not show_same:
-                        continue
-                    rows.append(f'''<div class="row">
-                        <div class="cell cell-left"><span class="num">#{l_idx}</span> {html.escape(left)}</div>
-                        <div class="cell cell-right"><span class="num">#{r_idx}</span> {html.escape(right)}</div>
-                    </div>''')
-                elif typ == 'del':
-                    rows.append(f'''<div class="row">
-                        <div class="cell cell-left has-diff"><span class="num">#{l_idx}</span> <span class="diff">{html.escape(left)}</span></div>
-                        <div class="cell cell-right empty">-</div>
-                    </div>''')
-                elif typ == 'add':
-                    rows.append(f'''<div class="row">
-                        <div class="cell cell-left empty">-</div>
-                        <div class="cell cell-right has-diff"><span class="num">#{r_idx}</span> <span class="diff">{html.escape(right)}</span></div>
-                    </div>''')
-                elif typ == 'mod':
-                    left_h, right_h, _ = get_diff_highlight(left, right)
-                    rows.append(f'''<div class="row">
-                        <div class="cell cell-left has-diff"><span class="num">#{l_idx}</span> {left_h}</div>
-                        <div class="cell cell-right has-diff"><span class="num">#{r_idx}</span> {right_h}</div>
-                    </div>''')
-            
-            if rows:
-                st.markdown("".join(rows), unsafe_allow_html=True)
-            elif not show_same:
-                st.info("✅ Tidak ada perbedaan di chapter ini")
+        rows_html.append(f'''<div class="row" id="para-{i}">
+            <div class="{left_class}"><span class="num">#{j}</span>{left_html}</div>
+            <div class="{right_class}"><span class="num">#{i+1}</span>{right_html}</div>
+        </div>''')
+        
+        shown += 1
+    
+    st.markdown(f'<div class="content-box">{"".join(rows_html)}</div>', unsafe_allow_html=True)
+    
+    if shown >= max_show:
+        st.warning(f"⚠️ Menampilkan {max_show} paragraf pertama. Centang 'Hanya tampilkan yang berbeda' untuk fokus pada perbedaan.")
 
 else:
-    st.info("👆 Upload kedua file EPUB untuk memulai perbandingan")
+    st.info("👆 Upload kedua file EPUB untuk memulai")
     
     st.markdown("""
     ### 📋 Cara Penggunaan:
-    1. Upload **EPUB Lama** (original) di kolom kiri
-    2. Upload **EPUB Baru** (revised) di kolom kanan
-    3. Bagian yang berbeda akan di-**highlight biru**
-    4. Tinggal copy teks yang biru untuk diterjemahkan!
+    1. Upload **EPUB Original** di kiri
+    2. Upload **EPUB Revised** di kanan
+    3. Konten **baru/berbeda** akan di-highlight **biru**
     
     ### ✨ Fitur:
-    - Side-by-side comparison
-    - Highlight biru untuk perbedaan
-    - Filter per chapter
-    - Deteksi paragraf ditambah/dihapus/diubah
+    - Deteksi paragraf baru yang tidak ada di versi original
+    - Side-by-side display
+    - Filter hanya tampilkan perbedaan
     """)
